@@ -100,7 +100,7 @@ class FakeObjectGenerator:
         preserves_type_context: bool = False,
         type_interval_lower: int = 5,
         type_interval_upper: int = 7,
-        run_id: Optional[int] = None,
+        run_id: Optional[int | DBID] = None,
         titos: Optional[List[SourceLocation]] = None,
     ) -> TraceFrame:
         leaves = leaves or []
@@ -151,7 +151,7 @@ class FakeObjectGenerator:
         preserves_type_context: bool = False,
         type_interval_lower: int = 5,
         type_interval_upper: int = 7,
-        run_id: Optional[int] = None,
+        run_id: Optional[int | DBID] = None,
         titos: Optional[List[SourceLocation]] = None,
     ) -> TraceFrame:
         leaves = leaves or []
@@ -266,7 +266,7 @@ class FakeObjectGenerator:
         min_trace_length_to_sources: Optional[int] = None,
         min_trace_length_to_sinks: Optional[int] = None,
         purge_status: PurgeStatusForInstance = PurgeStatusForInstance.none,
-        run_id: Optional[int] = None,
+        run_id: Optional[int | DBID] = None,
         archive_if_new_issue: bool = True,
     ) -> IssueInstance:
         issue_id = issue_id if issue_id is not None else DBID(1)
@@ -308,7 +308,7 @@ class FakeObjectGenerator:
         class_name: str = "\\Foo",
         lower_bound: int = 0,
         upper_bound: int = 100,
-        run_id: Optional[int] = None,
+        run_id: Optional[int | DBID] = None,
     ) -> ClassTypeInterval:
         interval = ClassTypeInterval.Record(
             id=DBID(),

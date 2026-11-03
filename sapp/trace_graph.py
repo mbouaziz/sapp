@@ -48,6 +48,9 @@ class TraceGraph:
         self._issues: Dict[int, Issue] = {}
         self._issue_instances: Dict[int, IssueInstance] = {}
         self._trace_annotations: Dict[int, TraceFrameAnnotation] = {}
+        self._trace_annotations_by_frame: Optional[
+            Dict[int, List[TraceFrameAnnotation]]
+        ] = None
 
         # Create a mapping from caller_id -> caller_port -> set of frame ids.
         self._trace_frames_map: DefaultDict[
@@ -213,16 +216,19 @@ class TraceGraph:
 
     def add_trace_annotation(self, annotation: TraceFrameAnnotation) -> None:
         self._trace_annotations[annotation.id.local_id] = annotation
+        # Records live in _trace_annotations; this lookup is rebuilt lazily.
+        self._trace_annotations_by_frame = None
 
     def get_trace_annotation(self, annotation_id: int) -> TraceFrameAnnotation:
         return self._trace_annotations[annotation_id]
 
     def get_condition_annotations(self, cond_id: int) -> List[TraceFrameAnnotation]:
-        return [
-            t
-            for t in self._trace_annotations.values()
-            if t.trace_frame_id.local_id == cond_id
-        ]
+        if self._trace_annotations_by_frame is None:
+            by_frame: Dict[int, List[TraceFrameAnnotation]] = defaultdict(list)
+            for annotation in self._trace_annotations.values():
+                by_frame[annotation.trace_frame_id.local_id].append(annotation)
+            self._trace_annotations_by_frame = by_frame
+        return list(self._trace_annotations_by_frame.get(cond_id, []))
 
     def get_annotation_trace_frames(self, ann_id: int) -> List[TraceFrame]:
         if ann_id in self._trace_frame_annotation_trace_frame_assoc:

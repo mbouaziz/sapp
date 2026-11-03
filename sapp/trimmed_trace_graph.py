@@ -145,6 +145,7 @@ class TrimmedTraceGraph(TraceGraph):
             self._trim_to_run_id()
 
     def _trim_to_run_id(self) -> None:
+        self._trace_annotations_by_frame = None
         for class_name, interval in self._class_type_intervals.copy().items():
             if interval.run_id is not self._run_id:
                 del self._class_type_intervals[class_name]
@@ -234,7 +235,7 @@ class TrimmedTraceGraph(TraceGraph):
         for inst in to_remove:
             self._remove_instance(inst)
 
-        self._class_type_intervals = graph._class_type_intervals
+        self._class_type_intervals = graph._class_type_intervals.copy()
 
     def _remove_instance(self, instance: IssueInstance) -> None:
         """Remove instance from state that gets saved and cleanup all instance
@@ -595,7 +596,8 @@ class TrimmedTraceGraph(TraceGraph):
         affected_instance_ids = [
             instance.id.local_id
             for instance in graph._issue_instances.values()
-            if self._is_filename_prefixed_with(
+            if self._is_selected_run(instance.run_id)
+            and self._is_filename_prefixed_with(
                 graph.get_text(instance.filename_id), self._affected_files
             )
         ]
@@ -629,7 +631,8 @@ class TrimmedTraceGraph(TraceGraph):
         initial_trace_frames = [
             trace_frame
             for trace_frame in graph._trace_frames.values()
-            if self._is_filename_prefixed_with(
+            if self._is_selected_run(trace_frame.run_id)
+            and self._is_filename_prefixed_with(
                 graph.get_text(trace_frame.filename_id), self._affected_files
             )
         ]
@@ -654,6 +657,8 @@ class TrimmedTraceGraph(TraceGraph):
             (trace_frame.caller_id.local_id, trace_frame.caller_port)
         ]:
             predecessor = graph._trace_frames[trace_frame_id]
+            if not self._is_selected_run(predecessor.run_id):
+                continue
             assert predecessor.leaf_mapping is not None
             pred_kinds = graph.compute_prev_leaf_kinds(leaves, predecessor.leaf_mapping)
             result.append((predecessor, pred_kinds))
@@ -671,7 +676,8 @@ class TrimmedTraceGraph(TraceGraph):
             trace_frame.callee_id.local_id
         ][trace_frame.callee_port]:
             successor = graph._trace_frames[trace_frame_id]
-            result.append(successor)
+            if self._is_selected_run(successor.run_id):
+                result.append(successor)
         return (result, succ_kinds)
 
     def _is_root_port(self, port: str) -> bool:
@@ -840,6 +846,8 @@ class TrimmedTraceGraph(TraceGraph):
                 continue
 
             trace_frame = graph._trace_frames[trace_frame_id]
+            if not self._is_selected_run(trace_frame.run_id):
+                continue
             self._add_trace_frame(graph, trace_frame)
             self._visited_trace_frame_ids.add(trace_frame_id)
 
@@ -882,6 +890,9 @@ class TrimmedTraceGraph(TraceGraph):
                         and leaf_id in graph._shared_texts
                     ):
                         self.add_shared_text(graph._shared_texts[leaf_id])
+
+    def _is_selected_run(self, run_id: DBID) -> bool:
+        return self._run_id is None or run_id is self._run_id
 
     @staticmethod
     def _is_filename_prefixed_with(filename: str, prefixes: Iterable[str]) -> bool:
