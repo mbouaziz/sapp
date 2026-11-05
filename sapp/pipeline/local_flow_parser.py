@@ -38,18 +38,28 @@ class LocalFlowParserError(ParseError):
 class _Endpoint:
     callable: str
     file: str
+
+
+@dataclass(frozen=True)
+class _Location:
+    file: str
     line: int
 
 
 @dataclass(frozen=True)
 class _IssueFacts:
+    location_source: _Location
+    location_target: _Location
+    sink_call: _Location | None
+    path: tuple[str, ...]
     source_kinds: tuple[str, ...] = ()
     sink_kinds: tuple[str, ...] = ()
     features: tuple[str, ...] = ()
-    # Call chains that reach the same target through the same path share a
-    # canonical flow.
+    # Call chains, and paths below the reached root, that reach the same target
+    # share a canonical flow.
     call_chains: int = 1
     sink_call_sites: int = 1
+    paths: int = 1
 
 
 @dataclass(frozen=True)
@@ -78,48 +88,64 @@ def _require_fields(value: dict[str, Any], expected: set[str], context: str) -> 
         )
 
 
+def _parse_nonempty_string(value: object, context: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise LocalFlowParserError(f"{context} must be a nonempty string")
+    return value
+
+
+def _parse_optional_string(value: object, context: str) -> str | None:
+    if value is None:
+        return None
+    return _parse_nonempty_string(value, context)
+
+
 def _parse_endpoint(value: object, context: str) -> dict[str, object]:
     if not isinstance(value, dict):
         raise LocalFlowParserError(f"{context} must be an object")
-    _require_fields(value, {"callable", "id"}, context)
-    callable_name = value["callable"]
-    endpoint_id = value["id"]
+    _require_fields(value, {"callable", "file"}, context)
+    callable_name = _parse_nonempty_string(value["callable"], f"{context}.callable")
+    # Endpoints that models define have an empty file.
+    filename = value["file"]
+    if not isinstance(filename, str):
+        raise LocalFlowParserError(f"{context}.file must be a string")
 
-    if not isinstance(callable_name, str) or not callable_name:
-        raise LocalFlowParserError(f"{context}.callable must be a nonempty string")
-
-    if not isinstance(endpoint_id, dict):
-        raise LocalFlowParserError(f"{context}.id must be an object")
-
-    _require_fields(endpoint_id, {"file", "line"}, f"{context}.id")
-    filename = endpoint_id["file"]
-    line = endpoint_id["line"]
-
-    if not isinstance(filename, str) or not filename:
-        raise LocalFlowParserError(f"{context}.id.file must be a nonempty string")
-
-    if not isinstance(line, int) or isinstance(line, bool) or line < 1:
-        raise LocalFlowParserError(f"{context}.id.line must be a positive integer")
-
-    return {
-        "callable": callable_name,
-        "id": {"file": filename, "line": line},
-    }
+    return {"callable": callable_name, "file": filename}
 
 
 def _parse_identity(value: object) -> dict[str, object]:
     if not isinstance(value, dict):
         raise LocalFlowParserError("canonical flow must be an object")
 
-    _require_fields(value, {"source", "target", "path"}, "canonical flow")
-    source = _parse_endpoint(value["source"], "canonical flow source")
-    target = _parse_endpoint(value["target"], "canonical flow target")
-
-    path = value["path"]
-    if not isinstance(path, list) or not all(isinstance(label, str) for label in path):
-        raise LocalFlowParserError("canonical flow path must be a string list")
-
-    return {"source": source, "target": target, "path": path}
+    _require_fields(
+        value,
+        {
+            "source",
+            "target",
+            "seed_port",
+            "reached_root",
+            "source_callee",
+            "target_caller",
+        },
+        "canonical flow",
+    )
+    # LFE writes the fields in this order, and the ID hashes that encoding.
+    return {
+        "source": _parse_endpoint(value["source"], "canonical flow source"),
+        "target": _parse_endpoint(value["target"], "canonical flow target"),
+        "seed_port": _parse_optional_string(
+            value["seed_port"], "canonical flow seed_port"
+        ),
+        "reached_root": _parse_optional_string(
+            value["reached_root"], "canonical flow reached_root"
+        ),
+        "source_callee": _parse_nonempty_string(
+            value["source_callee"], "canonical flow source_callee"
+        ),
+        "target_caller": _parse_nonempty_string(
+            value["target_caller"], "canonical flow target_caller"
+        ),
+    }
 
 
 def _canonical_json(value: object) -> str:
@@ -214,13 +240,48 @@ def _merge_suffix(facts: _IssueFacts) -> str:
     )
 
 
+def _parse_location(value: object, context: str) -> _Location:
+    if not isinstance(value, dict):
+        raise LocalFlowParserError(f"{context} must be an object")
+    _require_fields(value, {"file", "line"}, context)
+    filename = value["file"]
+    line = value["line"]
+    # LFE cannot place constants or nodes that several records share; they have
+    # an empty file and line 0.
+    if not isinstance(filename, str):
+        raise LocalFlowParserError(f"{context}.file must be a string")
+    if not isinstance(line, int) or isinstance(line, bool) or line < 0:
+        raise LocalFlowParserError(f"{context}.line must be a non-negative integer")
+    return _Location(file=filename, line=line)
+
+
 def _parse_issue_facts(payload: dict[str, Any]) -> _IssueFacts:
-    # Payloads from LFE versions without issue facts carry none, and fields that
-    # later LFE versions add are ignored.
-    facts = payload.get("issue_facts", {})
+    # Every payload places its flow; other facts default when absent, and fields
+    # that later LFE versions add are ignored.
+    facts = payload.get("issue_facts")
     if not isinstance(facts, dict):
         raise LocalFlowParserError("issue_facts must be an object")
+    location = facts.get("location")
+    if not isinstance(location, dict):
+        raise LocalFlowParserError("issue_facts.location must be an object")
+    _require_fields(
+        location, {"source", "target", "sink_call", "path"}, "issue_facts.location"
+    )
+    sink_call = location["sink_call"]
+    path = location["path"]
+    if not isinstance(path, list) or not all(isinstance(label, str) for label in path):
+        raise LocalFlowParserError("issue_facts.location.path must be a string list")
     return _IssueFacts(
+        location_source=_parse_location(
+            location["source"], "issue_facts.location.source"
+        ),
+        location_target=_parse_location(
+            location["target"], "issue_facts.location.target"
+        ),
+        sink_call=None
+        if sink_call is None
+        else _parse_location(sink_call, "issue_facts.location.sink_call"),
+        path=tuple(cast(list[str], path)),
         source_kinds=_parse_kinds(
             facts.get("source_kinds", []), "issue_facts.source_kinds"
         ),
@@ -232,16 +293,15 @@ def _parse_issue_facts(payload: dict[str, Any]) -> _IssueFacts:
         sink_call_sites=_parse_count(
             facts.get("sink_call_sites", 1), "issue_facts.sink_call_sites"
         ),
+        paths=_parse_count(facts.get("paths", 1), "issue_facts.paths"),
     )
 
 
 def _endpoint(identity: dict[str, object], name: str) -> _Endpoint:
     endpoint = cast(dict[str, object], identity[name])
-    endpoint_id = cast(dict[str, object], endpoint["id"])
     return _Endpoint(
         callable=cast(str, endpoint["callable"]),
-        file=cast(str, endpoint_id["file"]),
-        line=cast(int, endpoint_id["line"]),
+        file=cast(str, endpoint["file"]),
     )
 
 
@@ -365,8 +425,12 @@ class LocalFlowParser(BaseParser):
         ]
         source = _endpoint(identity, "source")
         target = _endpoint(identity, "target")
-        # Canonical endpoints contain a line number, but no columns.
-        location = SourceLocation(line_no=target.line, begin_column=1, end_column=1)
+        # The issue sits at the call site next to the sink, or at the target's
+        # record when the flow crosses no call. Locations have no columns.
+        issue_location = facts.sink_call or facts.location_target
+        location = SourceLocation(
+            line_no=issue_location.line, begin_column=1, end_column=1
+        )
         preconditions = _leaf_frames(
             target.callable, "sink", facts.sink_kinds, location
         )
@@ -388,8 +452,8 @@ class LocalFlowParser(BaseParser):
                     ),
                     callable=target.callable,
                     handle=self._issue_handle(code, canonical_id),
-                    filename=target.file,
-                    line=target.line,
+                    filename=issue_location.file,
+                    line=issue_location.line,
                     start=location.begin_column,
                     end=location.end_column,
                     preconditions=preconditions,
@@ -400,7 +464,7 @@ class LocalFlowParser(BaseParser):
                         f"local-flow-rule:{name}" for name in _rule_names(code_rules)
                     ]
                     + shared_features,
-                    callable_line=target.line,
+                    callable_line=issue_location.line,
                     fix_info=None,
                 )
                 for code, code_rules in sorted(rules_by_code.items())
@@ -409,7 +473,7 @@ class LocalFlowParser(BaseParser):
 
     def _issue_handle(self, code: int, canonical_id: str) -> str:
         handle = (
-            f"ts-local-flow:{self.repository}:{self.project}:v2:{code}:{canonical_id}"
+            f"ts-local-flow:{self.repository}:{self.project}:v3:{code}:{canonical_id}"
         )
         if len(handle) > HANDLE_LENGTH:
             raise LocalFlowParserError(
@@ -422,8 +486,8 @@ def _leaf_frames(
     callee: str, port: str, kinds: tuple[str, ...], location: SourceLocation
 ) -> list[ParseIssueConditionTuple]:
     # SAPP derives an issue's Source and Sink kinds only from the leaves of its
-    # trace frames, so each classified endpoint becomes one leaf frame. The
-    # canonical identity has no call site, so the frame uses the issue location.
+    # trace frames, so each classified endpoint becomes one leaf frame at the
+    # issue location.
     if not kinds:
         return []
     return [

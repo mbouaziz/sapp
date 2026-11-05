@@ -25,23 +25,39 @@ class TestLocalFlowParser(unittest.TestCase):
         temporary_directory = tempfile.TemporaryDirectory()
         self.addCleanup(temporary_directory.cleanup)
         self.directory = Path(temporary_directory.name)
-        self.identity = {
-            "source": {
-                "callable": "source",
-                "id": {"file": "src/source.ts", "line": 11},
-            },
-            "target": {
-                "callable": "sink",
-                "id": {"file": "src/sink.ts", "line": 29},
-            },
-            "path": ["field"],
+        self.identity: dict[str, object] = {
+            "source": {"callable": "source", "file": "src/source.ts"},
+            "target": {"callable": "sink", "file": "src/sink.ts"},
+            "seed_port": "p0",
+            "reached_root": "Inject(field)",
+            "source_callee": "caller",
+            "target_caller": "caller",
         }
         self.identity_json = _canonical_json(self.identity)
         self.canonical_id = hashlib.sha256(self.identity_json.encode()).hexdigest()
+        self.location: dict[str, object] = {
+            "source": {"file": "src/source.ts", "line": 11},
+            "target": {"file": "src/sink.ts", "line": 29},
+            "sink_call": {"file": "src/caller.ts", "line": 41},
+            "path": ["Project(input)", "Inject(field)"],
+        }
         self.unavailable_payload: dict[str, object] = {
             "trace_status": "trace_unavailable",
             "reason": {"reason": "budget_exceeded", "limit": "compressed_bytes"},
+            "issue_facts": self._facts(),
         }
+
+    def _facts(self, **fields: object) -> dict[str, object]:
+        return {"location": self.location, **fields}
+
+    def _identity_row(
+        self, identity: object, payload: object | None = None
+    ) -> tuple[str, str]:
+        identity_json = _canonical_json(identity)
+        canonical_id = hashlib.sha256(identity_json.encode()).hexdigest()
+        return canonical_id, self._row(
+            canonical_id=canonical_id, identity_json=identity_json, payload=payload
+        )
 
     def _available_payload(self) -> dict[str, object]:
         semantic_trace = {
@@ -77,6 +93,7 @@ class TestLocalFlowParser(unittest.TestCase):
             "description": "A local TypeScript flow",
             "patrace": {"repository": "fbsource", "frames": []},
             "semantic_trace": semantic_trace,
+            "issue_facts": self._facts(),
         }
 
     def _row(
@@ -148,12 +165,13 @@ class TestLocalFlowParser(unittest.TestCase):
         self.assertEqual(issue.code, 20002)
         self.assertEqual(
             issue.handle,
-            f"ts-local-flow:fbsource:example-app:v2:20002:{self.canonical_id}",
+            f"ts-local-flow:fbsource:example-app:v3:20002:{self.canonical_id}",
         )
         self.assertEqual(issue.message, "Local flow from source to sink")
         self.assertEqual(issue.callable, "sink")
-        self.assertEqual(issue.filename, "src/sink.ts")
-        self.assertEqual(issue.line, 29)
+        self.assertEqual(issue.filename, "src/caller.ts")
+        self.assertEqual(issue.line, 41)
+        self.assertEqual(issue.callable_line, 41)
         self.assertEqual(
             issue.features,
             [
@@ -176,18 +194,18 @@ class TestLocalFlowParser(unittest.TestCase):
             (self._available_payload(), "local-flow-trace:available"),
             (dict(self.unavailable_payload), "local-flow-trace:unavailable"),
         ):
-            payload["issue_facts"] = {
-                "source_kinds": ["http-request", "request-input"],
-                "sink_kinds": ["code-execution"],
-                "features": ["via-callback:modeled-invocation"],
-            }
+            payload["issue_facts"] = self._facts(
+                source_kinds=["http-request", "request-input"],
+                sink_kinds=["code-execution"],
+                features=["via-callback:modeled-invocation"],
+            )
             with self.subTest(trace_status=payload["trace_status"]):
                 _parser, issues = self._parse(
                     self._row(payload=payload) + "\n", {self.canonical_id: ["rule"]}
                 )
 
                 issue = issues[0]
-                location = SourceLocation(line_no=29, begin_column=1, end_column=1)
+                location = SourceLocation(line_no=41, begin_column=1, end_column=1)
                 self.assertEqual(
                     list(issue.postconditions),
                     [
@@ -236,11 +254,9 @@ class TestLocalFlowParser(unittest.TestCase):
 
     def test_unclassified_endpoints_keep_names_without_leaf_frames(self) -> None:
         payload = dict(self.unavailable_payload)
-        payload["issue_facts"] = {
-            "source_kinds": [],
-            "sink_kinds": ["code-execution"],
-            "features": [],
-        }
+        payload["issue_facts"] = self._facts(
+            source_kinds=[], sink_kinds=["code-execution"], features=[]
+        )
         _parser, issues = self._parse(
             self._row(payload=payload) + "\n", {self.canonical_id: ["rule"]}
         )
@@ -251,10 +267,9 @@ class TestLocalFlowParser(unittest.TestCase):
 
     def test_ignores_unknown_and_missing_issue_facts_fields(self) -> None:
         payload = dict(self.unavailable_payload)
-        payload["issue_facts"] = {
-            "sink_kinds": ["code-execution"],
-            "added_by_a_later_lfe": True,
-        }
+        payload["issue_facts"] = self._facts(
+            sink_kinds=["code-execution"], added_by_a_later_lfe=True
+        )
         _parser, issues = self._parse(
             self._row(payload=payload) + "\n", {self.canonical_id: ["rule"]}
         )
@@ -280,7 +295,7 @@ class TestLocalFlowParser(unittest.TestCase):
             ),
         ):
             payload = dict(self.unavailable_payload)
-            payload["issue_facts"] = merge
+            payload["issue_facts"] = self._facts(**merge)
             with self.subTest(merge=merge):
                 _parser, issues = self._parse(
                     self._row(payload=payload) + "\n", {self.canonical_id: ["rule"]}
@@ -288,19 +303,37 @@ class TestLocalFlowParser(unittest.TestCase):
                 self.assertEqual(issues[0].message, expected)
 
     def test_rejects_malformed_issue_facts(self) -> None:
+        sink_call = {"file": "src/caller.ts", "line": 41}
         for facts in (
             None,
             [],
-            {"source_kinds": "http-request"},
-            {"sink_kinds": [""]},
-            {"sink_kinds": [1]},
-            {"source_kinds": ["UserControlled@Transform"]},
-            {"sink_kinds": ["Transform->Sink"]},
-            {"sink_kinds": ["!Partial"]},
-            {"features": [None]},
-            {"call_chains": 0},
-            {"call_chains": True},
-            {"sink_call_sites": "2"},
+            self._facts(source_kinds="http-request"),
+            self._facts(sink_kinds=[""]),
+            self._facts(sink_kinds=[1]),
+            self._facts(source_kinds=["UserControlled@Transform"]),
+            self._facts(sink_kinds=["Transform->Sink"]),
+            self._facts(sink_kinds=["!Partial"]),
+            self._facts(features=[None]),
+            self._facts(call_chains=0),
+            self._facts(call_chains=True),
+            self._facts(sink_call_sites="2"),
+            self._facts(paths=0),
+            self._facts(location=[]),
+            self._facts(location={**self.location, "extra": 1}),
+            self._facts(location={**self.location, "sink_call": []}),
+            self._facts(location={**self.location, "sink_call": {"file": "a.ts"}}),
+            self._facts(location={**self.location, "path": "Inject(field)"}),
+            self._facts(location={**self.location, "path": [1]}),
+            self._facts(location={**self.location, "target": {"file": 1, "line": 29}}),
+            self._facts(
+                location={**self.location, "source": {"file": "a.ts", "line": -1}}
+            ),
+            self._facts(
+                location={**self.location, "source": {"file": "a.ts", "line": True}}
+            ),
+            self._facts(
+                location={**self.location, "sink_call": {**sink_call, "line": "41"}}
+            ),
         ):
             payload = dict(self.unavailable_payload)
             payload["issue_facts"] = facts
@@ -328,8 +361,8 @@ class TestLocalFlowParser(unittest.TestCase):
         self.assertEqual(
             [issue.handle for issue in issues],
             [
-                f"ts-local-flow:fbsource:example-app:v2:6019:{self.canonical_id}",
-                f"ts-local-flow:fbsource:example-app:v2:6026:{self.canonical_id}",
+                f"ts-local-flow:fbsource:example-app:v3:6019:{self.canonical_id}",
+                f"ts-local-flow:fbsource:example-app:v3:6026:{self.canonical_id}",
             ],
         )
         self.assertEqual(
@@ -466,7 +499,8 @@ class TestLocalFlowParser(unittest.TestCase):
 
     def test_duplicate_identity_keys_fail_canonical_reserialization(self) -> None:
         duplicate_identity = self.identity_json.replace(
-            '"path":["field"]', '"path":["obsolete"],"path":["field"]'
+            '"target_caller":"caller"',
+            '"target_caller":"obsolete","target_caller":"caller"',
         )
         self.assertEqual(json.loads(duplicate_identity), self.identity)
         with self.assertRaisesRegex(LocalFlowParserError, "canonical JSON encoding"):
@@ -474,6 +508,145 @@ class TestLocalFlowParser(unittest.TestCase):
                 self._row(identity_json=duplicate_identity) + "\n",
                 {self.canonical_id: ["rule"]},
             )
+
+    def test_model_endpoint_with_empty_file_is_accepted(self) -> None:
+        model_target = dict(
+            self.identity, target={"callable": "Obj{db}", "file": ""}, seed_port=None
+        )
+        canonical_id, row = self._identity_row(model_target)
+        _parser, issues = self._parse(row + "\n", {canonical_id: ["rule"]})
+
+        self.assertEqual(issues[0].callable, "Obj{db}")
+        self.assertEqual(issues[0].filename, "src/caller.ts")
+
+    def test_identity_v1_is_rejected(self) -> None:
+        identity_v1 = {
+            "source": {
+                "callable": "source",
+                "id": {"file": "src/source.ts", "line": 11},
+            },
+            "target": {
+                "callable": "sink",
+                "id": {"file": "src/sink.ts", "line": 29},
+            },
+            "path": ["field"],
+        }
+        canonical_id, row = self._identity_row(identity_v1)
+        with self.assertRaisesRegex(LocalFlowParserError, "canonical flow fields"):
+            self._parse(row + "\n", {canonical_id: ["rule"]})
+
+    def test_identity_requires_exact_keys(self) -> None:
+        missing = dict(self.identity)
+        del missing["target_caller"]
+        endpoint_with_line = dict(
+            self.identity,
+            source={"callable": "source", "file": "src/source.ts", "line": 11},
+        )
+        for identity, message in (
+            (missing, "canonical flow fields"),
+            (dict(self.identity, path=["field"]), "canonical flow fields"),
+            (endpoint_with_line, "canonical flow source fields"),
+        ):
+            canonical_id, row = self._identity_row(identity)
+            with (
+                self.subTest(message=message, identity=identity),
+                self.assertRaisesRegex(LocalFlowParserError, message),
+            ):
+                self._parse(row + "\n", {canonical_id: ["rule"]})
+
+    def test_rejects_malformed_identity_fields(self) -> None:
+        for field, value in (
+            ("source", {"callable": "", "file": "src/source.ts"}),
+            ("target", {"callable": "sink", "file": None}),
+            ("seed_port", 0),
+            ("seed_port", ""),
+            ("reached_root", ["Inject(field)"]),
+            ("source_callee", ""),
+            ("target_caller", None),
+        ):
+            canonical_id, row = self._identity_row(
+                dict(self.identity, **{field: value})
+            )
+            with (
+                self.subTest(field=field, value=value),
+                self.assertRaisesRegex(LocalFlowParserError, f"canonical flow {field}"),
+            ):
+                self._parse(row + "\n", {canonical_id: ["rule"]})
+
+    def test_identity_key_order_must_match(self) -> None:
+        reordered = {
+            "seed_port": self.identity["seed_port"],
+            **{
+                key: value for key, value in self.identity.items() if key != "seed_port"
+            },
+        }
+        self.assertEqual(reordered, self.identity)
+        canonical_id, row = self._identity_row(reordered)
+        with self.assertRaisesRegex(LocalFlowParserError, "canonical JSON encoding"):
+            self._parse(row + "\n", {canonical_id: ["rule"]})
+
+    def test_non_ascii_identity_round_trips(self) -> None:
+        identity = dict(
+            self.identity, source={"callable": "sourcé", "file": "src/é.ts"}
+        )
+        canonical_id, row = self._identity_row(identity)
+        self.assertIn("sourcé", row, "the identity is written without ASCII escapes")
+        _parser, issues = self._parse(row + "\n", {canonical_id: ["rule"]})
+
+        self.assertEqual(
+            issues[0].handle,
+            f"ts-local-flow:fbsource:example-app:v3:20002:{canonical_id}",
+        )
+        self.assertEqual(issues[0].message, "Local flow from sourcé to sink")
+
+    def test_location_comes_from_payload_sink_call(self) -> None:
+        payload = dict(self.unavailable_payload)
+        payload["issue_facts"] = self._facts(sink_kinds=["code-execution"])
+        _parser, issues = self._parse(
+            self._row(payload=payload) + "\n", {self.canonical_id: ["rule"]}
+        )
+
+        issue = issues[0]
+        self.assertEqual(
+            (issue.filename, issue.line, issue.callable_line),
+            ("src/caller.ts", 41, 41),
+            "the issue sits at the call site next to the sink",
+        )
+        self.assertEqual(
+            [frame.location for frame in issue.preconditions],
+            [SourceLocation(line_no=41, begin_column=1, end_column=1)],
+        )
+
+    def test_location_falls_back_to_target_without_sink_call(self) -> None:
+        payload = dict(self.unavailable_payload)
+        payload["issue_facts"] = self._facts(
+            location={**self.location, "sink_call": None}
+        )
+        _parser, issues = self._parse(
+            self._row(payload=payload) + "\n", {self.canonical_id: ["rule"]}
+        )
+
+        self.assertEqual(
+            (issues[0].filename, issues[0].line, issues[0].callable_line),
+            ("src/sink.ts", 29, 29),
+            "a flow that crosses no call sits at its target's record",
+        )
+
+    def test_missing_location_is_an_error(self) -> None:
+        for payload in (self._available_payload(), dict(self.unavailable_payload)):
+            for facts in ({"sink_kinds": ["code-execution"]}, None):
+                if facts is None:
+                    del payload["issue_facts"]
+                else:
+                    payload["issue_facts"] = facts
+                with (
+                    self.subTest(status=payload["trace_status"], facts=facts),
+                    self.assertRaisesRegex(LocalFlowParserError, "issue_facts"),
+                ):
+                    self._parse(
+                        self._row(payload=payload) + "\n",
+                        {self.canonical_id: ["rule"]},
+                    )
 
     def test_validation_errors_are_parse_errors(self) -> None:
         self.assertTrue(issubclass(LocalFlowParserError, ParseError))
@@ -510,7 +683,11 @@ class TestLocalFlowParser(unittest.TestCase):
                     "limit": "compressed_bytes",
                 }
                 reason[field] = invalid
-                payload = {"trace_status": "trace_unavailable", "reason": reason}
+                payload = {
+                    "trace_status": "trace_unavailable",
+                    "reason": reason,
+                    "issue_facts": self._facts(),
+                }
                 with (
                     self.subTest(field=field, value=invalid),
                     self.assertRaises(LocalFlowParserError),
@@ -557,7 +734,11 @@ class TestLocalFlowParser(unittest.TestCase):
             {"reason": "new_reason", "limit": "new_limit", "details": [1]},
             {"reason": "", "limit": ""},
         ):
-            payload = {"trace_status": "trace_unavailable", "reason": reason}
+            payload = {
+                "trace_status": "trace_unavailable",
+                "reason": reason,
+                "issue_facts": self._facts(),
+            }
             with self.subTest(reason=reason):
                 parser, issues = self._parse(
                     self._row(payload=payload) + "\n",
@@ -578,6 +759,7 @@ class TestLocalFlowParser(unittest.TestCase):
             payload = {
                 "trace_status": "trace_unavailable",
                 "reason": {"reason": "budget_exceeded", "limit": limit},
+                "issue_facts": self._facts(),
             }
             with self.subTest(limit=limit):
                 parser, issues = self._parse(
@@ -588,10 +770,10 @@ class TestLocalFlowParser(unittest.TestCase):
                 issue = issues[0]
                 self.assertEqual(
                     issue.handle,
-                    f"ts-local-flow:fbsource:example-app:v2:20002:{self.canonical_id}",
+                    f"ts-local-flow:fbsource:example-app:v3:20002:{self.canonical_id}",
                 )
-                self.assertEqual(issue.filename, "src/sink.ts")
-                self.assertEqual(issue.line, 29)
+                self.assertEqual(issue.filename, "src/caller.ts")
+                self.assertEqual(issue.line, 41)
                 self.assertEqual(
                     parser.trace_payloads_by_handle[issue.handle],
                     _canonical_json(payload).encode(),
@@ -655,19 +837,17 @@ class TestLocalFlowParser(unittest.TestCase):
             )
 
     def test_accepts_unsorted_canonical_rows(self) -> None:
-        other_identity = {
-            "source": {
-                "callable": "other-source",
-                "id": {"file": "src/other.ts", "line": 3},
-            },
-            "target": self.identity["target"],
-            "path": ["other-field"],
-        }
+        other_identity = dict(
+            self.identity,
+            source={"callable": "other-source", "file": "src/other.ts"},
+            reached_root="Inject(other-field)",
+        )
         other_identity_json = _canonical_json(other_identity)
         other_id = hashlib.sha256(other_identity_json.encode()).hexdigest()
         other_payload = {
             "trace_status": "trace_unavailable",
             "reason": {"reason": "budget_exceeded", "limit": "raw_bytes"},
+            "issue_facts": self._facts(),
         }
         rows = sorted(
             [
@@ -691,14 +871,14 @@ class TestLocalFlowParser(unittest.TestCase):
         self.assertEqual(
             [issue.handle for issue in issues],
             [
-                f"ts-local-flow:fbsource:example-app:v2:20002:{flow_id}"
+                f"ts-local-flow:fbsource:example-app:v3:20002:{flow_id}"
                 for flow_id, _row in rows
             ],
         )
         self.assertEqual(len(parser.trace_payloads_by_handle), 2)
 
     def test_consumes_one_row_at_a_time_and_publishes_only_on_exhaustion(self) -> None:
-        other_identity = dict(self.identity, path=["other-field"])
+        other_identity = dict(self.identity, reached_root="Inject(other-field)")
         other_json = _canonical_json(other_identity)
         other_id = hashlib.sha256(other_json.encode()).hexdigest()
         first_row = self._row() + "\n"
@@ -804,24 +984,20 @@ class TestLocalFlowParser(unittest.TestCase):
         self.assertNotEqual(first[0].handle, other[0].handle)
 
     def test_filters_issues_and_trace_payloads_to_requested_handles(self) -> None:
-        other_identity = {
-            "source": {
-                "callable": "other-source",
-                "id": {"file": "src/other-source.ts", "line": 3},
-            },
-            "target": {
-                "callable": "other-sink",
-                "id": {"file": "src/other-sink.ts", "line": 7},
-            },
-            "path": ["other-field"],
-        }
+        other_identity = dict(
+            self.identity,
+            source={"callable": "other-source", "file": "src/other-source.ts"},
+            target={"callable": "other-sink", "file": "src/other-sink.ts"},
+            reached_root="Inject(other-field)",
+        )
         other_identity_json = _canonical_json(other_identity)
         other_id = hashlib.sha256(other_identity_json.encode()).hexdigest()
         other_payload = {
             "trace_status": "trace_unavailable",
             "reason": {"reason": "budget_exceeded", "limit": "raw_bytes"},
+            "issue_facts": self._facts(),
         }
-        keep_handle = f"ts-local-flow:fbsource:example-app:v2:6019:{self.canonical_id}"
+        keep_handle = f"ts-local-flow:fbsource:example-app:v3:6019:{self.canonical_id}"
         rows = sorted(
             [
                 (self.canonical_id, self._row()),
@@ -850,7 +1026,7 @@ class TestLocalFlowParser(unittest.TestCase):
         )
 
     def test_rejects_requested_handles_absent_from_result(self) -> None:
-        missing_handle = "ts-local-flow:fbsource:example-app:v2:6019:" + "f" * 64
+        missing_handle = "ts-local-flow:fbsource:example-app:v3:6019:" + "f" * 64
 
         with self.assertRaisesRegex(LocalFlowParserError, "requested issue handles"):
             self._parse(
