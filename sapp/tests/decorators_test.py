@@ -8,7 +8,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Generator
 from unittest import mock, TestCase
 
 from ..decorators import (
@@ -55,23 +54,14 @@ class RetryableTest(TestCase):
         self.assertEqual(3, self.times_through)
 
 
-def mocked_time_generator() -> Generator[float, None, None]:
-    """
-    Returns time in 10s increments
-    """
-    start = 578854800.0
-    while True:
-        yield start
-        start += 10
-
-
-@mock.patch("time.time", side_effect=mocked_time_generator())
+@mock.patch(f"{log_time.__module__}.time")
 class LogTimeTest(TestCase):
     @log_time
     def takes_some_time(self) -> None:
         pass
 
-    def testBasic(self, mocked_time_generator: mock.MagicMock) -> None:
+    def testBasic(self, mocked_time: mock.MagicMock) -> None:
+        mocked_time.time.side_effect = [578854800.0, 578854820.0]
         with self.assertLogs("sapp") as context_manager:
             self.takes_some_time()
         self.assertEqual(

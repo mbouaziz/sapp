@@ -135,8 +135,10 @@ class TestSappCli(TestCase):
             os.mknod(previous_handles_path)
             with patch(
                 PIPELINE_RUN,
-                partial(
-                    self.verify_previous_issue_handles, Path(previous_handles_path)
+                staticmethod(
+                    partial(
+                        self.verify_previous_issue_handles, Path(previous_handles_path)
+                    )
                 ),
             ):
                 result = self.runner.invoke(
