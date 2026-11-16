@@ -3,7 +3,6 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-# pyre-strict
 
 # This file provides a command for viewing the original json output associated
 # with callables. Almost every design choice made here was to find a balance of
