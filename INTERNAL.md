@@ -72,7 +72,33 @@ handle, and traces are explorable frame by frame. `scripts/sapp/filters/` holds 
 filters (JSON, importable with `sapp filter import`); `all.json` matches every rule code
 we use (1–6, 3001–3006), `new_issues.json` only issues new in the selected run.
 
-## 4. Operations notes
+## 4. Security posture (after the 2026-11-20 review)
+
+A depth scan of this repo (Sunfire Review, 233 files in scope, 47 reviewed in depth by 24
+sub-agents) found 2 high, 8 medium, 13 low — all fixed in PRs #11–#17 on
+`github.com/mbouaziz/sapp` (issues #1–#10; #5 stays open only for the workflow-YAML patch,
+which needs a `workflow`-scoped token — see the issue comment and
+`../scripts/sapp/ci-workflows.patch`). Full report: `../audit/sapp_sunfire_20261120.md`.
+
+What changed and what to respect when running it internally:
+
+| env / flag | behavior |
+|---|---|
+| (default) | server binds `localhost:13337`, no auth — same as upstream; safe against remote peers, and the Host-header allowlist blocks DNS-rebinding pages |
+| `SAPP_AUTH_TOKEN` | when set, every request needs `Authorization: Bearer <token>` (constant-time compare) — **set this before any `SAPP_SERVER_HOST` != localhost** |
+| `SAPP_SERVER_HOST` | overrides the loopback bind for hosted deployments (put a TLS reverse proxy in front) |
+| `--debug` | refused on non-loopback binds; GraphiQL only in debug |
+| `--source-directory` | the `file` GraphQL query and `explore`'s `list` only read files resolving inside it (absolute/`..`/symlink escapes are rejected) |
+| report bundles | `filename_glob` from a bundle's metadata.json is confined to the bundle dir |
+
+Also fixed: ReDoS budget on user-supplied `matches` regexes (1 s cap), `/export_filter`
+served as `application/json` + `nosniff`, typeahead queries capped at 10k rows, `sapp json`
+lookup-table paths validated, CI actions SHA-pinned + read-only tokens + `npm ci` +
+dependabot + `click>=8.3.3` (CVE-2026-7246) + qs/follow-redirects lock bump + publish
+guard. See `INTERNAL_APP.md` for the deployment plan and the Chonkcave/Linear
+non-redundancy check.
+
+## 5. Operations notes
 
 - DB is SQLite: copy/share `_work/sapp/*.db` freely; `sapp --database-engine memory` exists for throwaway parses.
 - Server: `SAPP_SERVER_PORT` (default 13337), host `localhost`; `--debug` adds CORS for a
