@@ -29,6 +29,6 @@ jobs:
           python -m pip install cython
           python -m pip install graphql-core typing_inspect
 
-      - uses: facebook/pyrefly@main
+      - uses: meta/pyrefly@main
         with:
           python-version: ${{ matrix.python-version }}
